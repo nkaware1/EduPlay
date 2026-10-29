@@ -1,0 +1,186 @@
+# يبني ملفات EXE (ويندوز) وAPK (أندرويد) من الحزم التي تصدّرها المنصة.
+#
+# الاستخدام:
+#   1) من صفحة النشاط في المنصة نزّل «حزمة سطح المكتب» و/أو «حزمة أندرويد» (ملفات zip).
+#   2) ضعها في مجلد exports/ في المستودع واعمل commit وpush.
+#      يجب أن ينتهي اسم الملف بـ -desktop.zip أو -android.zip (هكذا تُنزَّل أصلًا).
+#   3) من تبويب Actions انتظر انتهاء التشغيل، ثم نزّل الملفات من Releases
+#      (أو من Artifacts أسفل صفحة التشغيل).
+#
+# بديل: Actions ‣ Build apps ‣ Run workflow ثم الصق رابطًا مباشرًا لحزمة عامة من منصتك.
+name: Build apps (EXE / APK)
+
+on:
+  push:
+    paths:
+      - 'exports/*.zip'
+  workflow_dispatch:
+    inputs:
+      pack_url:
+        description: 'اختياري: رابط مباشر لحزمة zip (مثال: https://منصتك/api/export/ID?format=desktop)'
+        required: false
+        default: ''
+      pack_kind:
+        description: 'نوع الحزمة عند استخدام الرابط'
+        type: choice
+        options: [desktop, android]
+        default: desktop
+
+permissions:
+  contents: write # لنشر الملفات في Releases
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      desktop: ${{ steps.plan.outputs.desktop }}
+      android: ${{ steps.plan.outputs.android }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+          PACK_URL: ${{ inputs.pack_url }}
+          PACK_KIND: ${{ inputs.pack_kind }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=()
+          # عند الدفع: الحزم المضافة أو المعدّلة فقط. عند التشغيل اليدوي: كل الحزم.
+          if [ "$EVENT" = "push" ] && [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ] && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            while IFS= read -r f; do [ -n "$f" ] && files+=("$f"); done < <(git diff --name-only --diff-filter=AM "$BEFORE" "$SHA" -- 'exports/*.zip')
+          else
+            files=(exports/*.zip)
+          fi
+          desktop='[]'
+          android='[]'
+          for f in "${files[@]}"; do
+            name=$(basename "$f" .zip)
+            case "$name" in
+              *-desktop) desktop=$(jq -c --arg f "$f" --arg n "$name" '. + [{file:$f,url:"",name:$n}]' <<<"$desktop") ;;
+              *-android) android=$(jq -c --arg f "$f" --arg n "$name" '. + [{file:$f,url:"",name:$n}]' <<<"$android") ;;
+              *) echo "::warning::تم تجاهل $f — يجب أن ينتهي الاسم بـ -desktop.zip أو -android.zip" ;;
+            esac
+          done
+          if [ -n "${PACK_URL:-}" ]; then
+            n="remote-${GITHUB_RUN_NUMBER}-${PACK_KIND}"
+            entry=$(jq -cn --arg u "$PACK_URL" --arg n "$n" '{file:"",url:$u,name:$n}')
+            if [ "$PACK_KIND" = "android" ]; then android=$(jq -c --argjson e "$entry" '. + [$e]' <<<"$android"); else desktop=$(jq -c --argjson e "$entry" '. + [$e]' <<<"$desktop"); fi
+          fi
+          echo "desktop=$desktop" >> "$GITHUB_OUTPUT"
+          echo "android=$android" >> "$GITHUB_OUTPUT"
+          echo "desktop packs: $desktop"
+          echo "android packs: $android"
+
+  desktop:
+    needs: plan
+    if: ${{ needs.plan.outputs.desktop != '[]' }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pack: ${{ fromJSON(needs.plan.outputs.desktop) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Prepare pack
+        shell: pwsh
+        env:
+          PACK_FILE: ${{ matrix.pack.file }}
+          PACK_URL: ${{ matrix.pack.url }}
+        run: |
+          New-Item -ItemType Directory -Force work | Out-Null
+          if ($env:PACK_URL) { Invoke-WebRequest -Uri $env:PACK_URL -OutFile work/pack.zip } else { Copy-Item $env:PACK_FILE work/pack.zip }
+          Expand-Archive work/pack.zip -DestinationPath work/app
+      - name: Build EXE (Electron)
+        working-directory: work/app
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false' # بدون توقيع رقمي
+        run: |
+          npm install
+          npm run dist
+      - name: Collect
+        shell: pwsh
+        env:
+          PACK_NAME: ${{ matrix.pack.name }}
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          $exe = Get-ChildItem work/app/dist -Filter *.exe | Select-Object -First 1
+          if (-not $exe) { throw 'لم يُنتَج ملف exe' }
+          Copy-Item $exe.FullName "out/$($env:PACK_NAME).exe"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.pack.name }}-exe
+          path: out/*.exe
+          if-no-files-found: error
+
+  android:
+    needs: plan
+    if: ${{ needs.plan.outputs.android != '[]' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pack: ${{ fromJSON(needs.plan.outputs.android) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Prepare pack
+        env:
+          PACK_FILE: ${{ matrix.pack.file }}
+          PACK_URL: ${{ matrix.pack.url }}
+        run: |
+          set -euo pipefail
+          mkdir -p work
+          if [ -n "$PACK_URL" ]; then curl -fsSL -o work/pack.zip "$PACK_URL"; else cp "$PACK_FILE" work/pack.zip; fi
+          unzip -q work/pack.zip -d work/app
+      - name: Create Android project (Capacitor)
+        working-directory: work/app
+        run: |
+          npm install
+          npx cap add android
+          npx cap sync android
+      - name: Build APK
+        working-directory: work/app/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+      - name: Collect
+        env:
+          PACK_NAME: ${{ matrix.pack.name }}
+        run: |
+          mkdir -p out
+          cp work/app/android/app/build/outputs/apk/debug/app-debug.apk "out/${PACK_NAME}.apk"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.pack.name }}-apk
+          path: out/*.apk
+          if-no-files-found: error
+
+  release:
+    needs: [desktop, android]
+    if: ${{ always() && (needs.desktop.result == 'success' || needs.android.result == 'success') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apps-${{ github.run_number }}
+          name: تطبيقات الأنشطة #${{ github.run_number }}
+          body: ملفات EXE وAPK المبنية تلقائيًا. ملف APK تجريبي (debug) يُثبَّت مباشرة على الأجهزة.
+          files: out/*

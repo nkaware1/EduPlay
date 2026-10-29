@@ -1,0 +1,32 @@
+{
+  "name": "lamaa-server",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test:live": "node tests/live-quiz.mjs && node tests/live-modes.mjs"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-rate-limit": "^7.4.0",
+    "helmet": "^7.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "jszip": "^3.10.2",
+    "lamaa-platform": "file:..",
+    "multer": "^2.0.0",
+    "socket.io": "^4.8.4"
+  },
+  "optionalDependencies": {
+    "mongodb": "^6.8.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.8.0"
+  }
+}

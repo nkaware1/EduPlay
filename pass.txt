@@ -1,0 +1,3 @@
+تُنشأ بيانات تجريبية وحسابات تلقائيًا (teacher@demo.com / teacher123، student@demo.com / student123، admin@demo.com / admin123).
+
+الانتقال إلى MongoDB
